@@ -9,8 +9,14 @@ import sys
 from config import Settings, load_settings
 from geospider import fetch_stations, format_status_message
 from monitor import check_for_changes
-from storage import load_subscribers, save_subscribers
-from vk_api import VKApiError, VKCommunityClient, run_incoming_loop, unwrap_groups_get_by_id
+from storage import ensure_subscribers_seeded, load_subscribers, save_subscribers
+from vk_api import (
+    VKApiError,
+    VKCommunityClient,
+    run_incoming_loop,
+    unwrap_groups_get_by_id,
+    vk_error_code,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +153,7 @@ async def poll_loop(settings: Settings, vk: VKCommunityClient) -> None:
                         for peer_id in list(subs):
                             try:
                                 await vk.messages_send(peer_id, msg)
+                                logger.info("Оповещение отправлено peer=%s", peer_id)
                             except VKApiError as exc:
                                 logger.warning("VK send peer=%s: %s", peer_id, exc)
                             except Exception:
@@ -164,6 +171,20 @@ async def verify(settings: Settings, vk: VKCommunityClient) -> None:
     groups = unwrap_groups_get_by_id(raw)
     if groups:
         logger.info("VK сообщество: %s", groups[0].get("name", "?"))
+    logger.info("VK-токен: %s символов", len(settings.vk_group_token))
+    try:
+        await vk.get_long_poll_server()
+    except VKApiError as exc:
+        code = vk_error_code(exc)
+        if code in (15, 27):
+            await vk.call("messages.getConversations", filter="unread", count=1)
+            logger.info("VK messages API: OK (Long Poll код %s)", code)
+        else:
+            raise
+    else:
+        logger.info("VK Long Poll: OK")
+    n_subs = ensure_subscribers_seeded()
+    logger.info("Подписчиков на оповещения: %s", n_subs)
     stations = await fetch_stations(settings)
     logger.info("ГЕОСПАЙДЕР: %s станций", len(stations))
 

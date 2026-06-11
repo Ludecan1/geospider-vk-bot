@@ -39,6 +39,25 @@ def _clean_vk_token(raw: str) -> str:
     return s
 
 
+def _resolve_vk_group_token() -> str:
+    """
+    Bothost кладёт токен в BOT_TOKEN; в .env — VK_GROUP_TOKEN.
+    Если заданы оба, берём более длинный (защита от обрезанного VK_GROUP_TOKEN в панели).
+    """
+    candidates: list[str] = []
+    for key in ("VK_GROUP_TOKEN", "BOT_TOKEN", "VK_BOT_TOKEN"):
+        from_file = read_env_value(key)
+        if from_file:
+            candidates.append(_clean_vk_token(from_file))
+        from_env = os.getenv(key, "")
+        if from_env:
+            candidates.append(_clean_vk_token(from_env))
+    candidates = [t for t in candidates if t]
+    if not candidates:
+        return ""
+    return max(candidates, key=len)
+
+
 def load_settings() -> Settings:
     from env_utils import ENV_FILE, count_env_assignments, read_env_value
 
@@ -53,11 +72,16 @@ def load_settings() -> Settings:
                 "В .env несколько строк VK_GROUP_ID= — используется последняя непустая."
             )
 
-    token = read_env_value("VK_GROUP_TOKEN") or os.getenv("VK_GROUP_TOKEN", "")
-    token = _clean_vk_token(token)
+    token = _resolve_vk_group_token()
     if not token:
         raise RuntimeError(
-            "Задайте VK_GROUP_TOKEN в .env — ключ доступа сообщества с правом «Сообщения сообщества»"
+            "Задайте VK_GROUP_TOKEN (или BOT_TOKEN на Bothost) — ключ доступа сообщества "
+            "с правом «Сообщения сообщества»"
+        )
+    if len(token) < 180:
+        logger.warning(
+            "VK-токен короткий (%s символов) — возможно обрезан при копировании в панель хостинга",
+            len(token),
         )
     gid_raw = read_env_value("VK_GROUP_ID") or os.getenv("VK_GROUP_ID", "")
     gid = gid_raw.strip()
