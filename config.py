@@ -8,6 +8,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from env_utils import count_env_assignments, read_env_value
+
 logger = logging.getLogger(__name__)
 
 # Всегда .env рядом с этим файлом (не «текущая папка»), и с override=True — иначе старый
@@ -59,7 +61,7 @@ def _resolve_vk_group_token() -> str:
 
 
 def load_settings() -> Settings:
-    from env_utils import ENV_FILE, count_env_assignments, read_env_value
+    from env_utils import ENV_FILE
 
     if ENV_FILE.exists():
         if count_env_assignments("VK_GROUP_TOKEN") > 1:
