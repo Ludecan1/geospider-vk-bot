@@ -17,8 +17,18 @@ def _read_json(path: Path, default: Any) -> Any:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         return default
-    with path.open(encoding="utf-8") as file:
-        return json.load(file)
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        logger.warning("Не удалось прочитать %s: %s", path.name, exc)
+        return default
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("Повреждён %s — сброс к значению по умолчанию", path.name)
+        return default
 
 
 def _write_json(path: Path, data: Any) -> None:
