@@ -20,6 +20,7 @@ load_dotenv(dotenv_path=BOT_ENV_FILE, override=True)
 DATA_DIR = Path(__file__).resolve().parent / "data"
 STATE_FILE = DATA_DIR / "station_state.json"
 SUBSCRIBERS_FILE = DATA_DIR / "subscribers.json"
+USER_SETTINGS_FILE = DATA_DIR / "user_settings.json"
 
 
 @dataclass(frozen=True)
@@ -102,7 +103,7 @@ def load_settings() -> Settings:
     return Settings(
         vk_group_token=token,
         vk_group_id=gid_int,
-        poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "60")),
+        poll_interval_seconds=max(10, int(os.getenv("POLL_INTERVAL_SECONDS", "30"))),
         api_url=os.getenv(
             "GEOSPIDER_API_URL",
             "https://api.geospider.ru/geospider/SitesInfo.asmx/GetAllSites",

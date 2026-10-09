@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 
 import httpx
 
@@ -30,6 +30,23 @@ STATUS_EMOJI: dict[int, str] = {
 
 MAP_URL = "https://geospider.ru/networkmap"
 
+# Упрощённое состояние для уведомлений: только «работает» / «не работает».
+STATE_UP = "up"
+STATE_DOWN = "down"
+
+# Промежуточные статусы: по ним уведомления не шлём, ждём устойчивого состояния.
+TRANSIENT_CODES: frozenset[int] = frozenset({6})
+WORKING_CODES: frozenset[int] = frozenset({3})
+
+
+def stable_state(code: int) -> str | None:
+    """'up' — работает, 'down' — не работает, None — промежуточный статус (соединяется)."""
+    if code in WORKING_CODES:
+        return STATE_UP
+    if code in TRANSIENT_CODES:
+        return None
+    return STATE_DOWN
+
 
 @dataclass(frozen=True)
 class Station:
@@ -39,6 +56,7 @@ class Station:
     lon: float
     status_code: int
     status_update: str
+    distance_km: float = 0.0
 
     @property
     def status_label(self) -> str:
@@ -52,31 +70,9 @@ class Station:
     def key(self) -> str:
         return self.site_code
 
-    def to_state_value(self) -> dict[str, Any]:
-        return {
-            "status_code": self.status_code,
-            "status_update": self.status_update,
-        }
-
 
 def status_label(code: int) -> str:
     return STATUS_LABELS.get(code, f"Код {code}")
-
-
-def parse_station(raw: dict[str, Any]) -> Station | None:
-    try:
-        lat = float(raw["LatDeg"])
-        lon = float(raw["LonDeg"])
-        return Station(
-            site_code=str(raw["SiteCode"]),
-            rtcm_id=int(raw["RtcmId"]),
-            lat=lat,
-            lon=lon,
-            status_code=int(raw["StatusCode"]),
-            status_update=str(raw.get("StatusUpdate", "")),
-        )
-    except (KeyError, TypeError, ValueError):
-        return None
 
 
 def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -89,14 +85,25 @@ def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 
-def in_region(station: Station, settings: Settings) -> bool:
-    return (
-        distance_km(settings.center_lat, settings.center_lon, station.lat, station.lon)
-        <= settings.radius_km
-    )
+def parse_station(raw: dict[str, Any], settings: Settings) -> Station | None:
+    try:
+        lat = float(raw["LatDeg"])
+        lon = float(raw["LonDeg"])
+        return Station(
+            site_code=str(raw["SiteCode"]).strip(),
+            rtcm_id=int(raw["RtcmId"]),
+            lat=lat,
+            lon=lon,
+            status_code=int(raw["StatusCode"]),
+            status_update=str(raw.get("StatusUpdate", "")),
+            distance_km=distance_km(settings.center_lat, settings.center_lon, lat, lon),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
-async def fetch_stations(settings: Settings) -> list[Station]:
+async def fetch_all_stations(settings: Settings, *, max_radius_km: float | None = None) -> list[Station]:
+    """Все станции из API (опционально — не дальше max_radius_km от центра), по коду."""
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.get(settings.api_url)
         response.raise_for_status()
@@ -107,27 +114,36 @@ async def fetch_stations(settings: Settings) -> list[Station]:
 
     stations: list[Station] = []
     for item in payload:
-        station = parse_station(item)
-        if station and in_region(station, settings):
-            stations.append(station)
+        station = parse_station(item, settings) if isinstance(item, dict) else None
+        if station is None:
+            continue
+        if max_radius_km is not None and station.distance_km > max_radius_km:
+            continue
+        stations.append(station)
 
     stations.sort(key=lambda s: s.site_code)
     return stations
 
 
+async def fetch_stations(settings: Settings) -> list[Station]:
+    """Станции в радиусе RADIUS_KM (используется network_check.py)."""
+    return await fetch_all_stations(settings, max_radius_km=settings.radius_km)
+
+
 def format_station_line(station: Station) -> str:
     return (
         f"{station.status_emoji} {station.site_code} "
-        f"(RTCM {station.rtcm_id}) — {station.status_label}"
+        f"(RTCM {station.rtcm_id}, {station.distance_km:.0f} км) — {station.status_label}"
     )
 
 
-def format_status_message(stations: list[Station], title: str, *, radius_km: float = 75) -> str:
+def format_status_message(stations: Iterable[Station], title: str) -> str:
+    stations = list(stations)
     if not stations:
-        return f"{title}\n\nВ радиусе {radius_km:g} км от центра станций не найдено."
+        return f"{title}\n\nПо вашим настройкам станций не найдено. Измените их в «⚙ настройки»."
 
     lines = [title, ""]
-    working = sum(1 for s in stations if s.status_code == 3)
+    working = sum(1 for s in stations if s.status_code in WORKING_CODES)
     lines.append(f"Всего: {len(stations)} · работает: {working}")
     lines.append("")
     lines.extend(format_station_line(s) for s in stations)
@@ -136,15 +152,14 @@ def format_status_message(stations: list[Station], title: str, *, radius_km: flo
     return "\n".join(lines)
 
 
-def format_change_message(
-    station: Station, old_code: int, old_update: str
-) -> str:
-    old_l = status_label(old_code)
+def format_change_message(station: Station, new_state: str) -> str:
+    if new_state == STATE_UP:
+        head = f"🟢 Станция {station.site_code} снова работает"
+    else:
+        head = f"🔴 Станция {station.site_code} не работает ({station.status_label})"
     return (
-        "⚠️ Изменение статуса\n\n"
-        f"{station.site_code} (RTCM {station.rtcm_id})\n"
-        f"Было: {old_l}\n"
-        f"Стало: {station.status_label}\n"
+        f"{head}\n\n"
+        f"RTCM {station.rtcm_id} · {station.distance_km:.0f} км от центра\n"
         f"Обновлено: {station.status_update or '—'}\n"
         f"Координаты: {station.lat:.5f}, {station.lon:.5f}\n\n"
         f"Карта: {MAP_URL}"
